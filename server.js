@@ -1,47 +1,100 @@
 const express = require('express');
 const amqp = require('amqplib');
+const cors = require('cors');
+const { v4: uuidv4 } = require('uuid');
 
 const app = express();
-const port = 3001; // Port dla backendowego serwera
+const port = 3001;
 
-// Ręcznie wprowadzone dane logowania RabbitMQ
-//const rabbitmqUrl = 'amqp://rabbitmq:rabbitmq@localhost';
 const rabbitmqUrl = process.env.RABBITMQ_URL;
-const queueName = 'compile_queue'; // Nazwa kolejki
+const queueName = 'compile_queue';
+const queueResponseName = 'reply_queue';
 
 let channel = null;
+let responseQueue = null;
+const responsePromises = new Map(); // Map to store correlationId and promises
 
-// Funkcja do nawiązania połączenia z RabbitMQ
 async function connectToRabbitMQ() {
   try {
     const connection = await amqp.connect(rabbitmqUrl);
     channel = await connection.createChannel();
     await channel.assertQueue(queueName);
-    console.log('Connected to RabbitMQ and queue created');
+    responseQueue = await channel.assertQueue(queueResponseName);
+    console.log('Connected to RabbitMQ');
+    console.log(`Compile Queue Created: ${queueName}`);
+    console.log(`Response Queue Created: ${responseQueue.queue}`);
+
+    // Start consuming messages from the response queue
+    channel.consume(responseQueue.queue, (msg) => {
+      if (msg && msg.properties && msg.properties.correlationId) {
+        const correlationId = msg.properties.correlationId;
+        if (responsePromises.has(correlationId)) {
+          const { resolve, reject, timer } = responsePromises.get(correlationId);
+          clearTimeout(timer);
+          resolve(msg.content.toString());
+          responsePromises.delete(correlationId);
+          channel.ack(msg);
+        }
+      }
+    }, { noAck: false });
+
   } catch (error) {
     console.error('Error connecting to RabbitMQ:', error);
+    setTimeout(connectToRabbitMQ, 5000);
   }
 }
 
 connectToRabbitMQ();
 
-// Middleware do obsługi JSON
+app.use(cors()); // TODO: Add config
 app.use(express.json());
 
-// Endpoint do wysyłania kodu do RabbitMQ
-app.post('/compile', async (req, res) => {
+app.post('/compile', (req, res) => {
   const { file } = req.body;
-  try {
-    if (!channel) {
-      await connectToRabbitMQ();
-    }
-    channel.sendToQueue(queueName, Buffer.from(file));
-    res.status(200).json({ message: 'File sent to RabbitMQ' });
-  } catch (error) {
-    console.error('Error sending message to RabbitMQ:', error);
-    res.status(500).json({ error: 'Failed to send file to RabbitMQ' });
+  if (!file) {
+    return res.status(400).json({ error: 'No file provided' });
+  }
+
+  if (!channel) {
+    connectToRabbitMQ().then(() => {
+      sendAndReceiveMessage(file, res);
+    }).catch(error => {
+      console.error('Error connecting to RabbitMQ:', error);
+      res.status(500).json({ error: 'Failed to connect to RabbitMQ' });
+    });
+  } else {
+    sendAndReceiveMessage(file, res);
   }
 });
+
+function sendAndReceiveMessage(file, res) {
+  const correlationId = uuidv4();
+
+  const responsePromise = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error('Timeout waiting for response'));
+    }, 30000);
+
+    responsePromises.set(correlationId, { resolve, reject, timer });
+  });
+
+  channel.sendToQueue(queueName, Buffer.from(file), {
+    correlationId: correlationId,
+    replyTo: responseQueue.queue,
+    routingKey: 'rpc_key'
+  });
+
+  console.log(`Message sent to queue: ${queueName} with correlationId: ${correlationId}`);
+
+  responsePromise
+    .then(response => {
+      res.status(200).send(response);
+    })
+    .catch(error => {
+      console.error('Error receiving response from RabbitMQ:', error);
+      res.status(500).json({ error: 'Failed to receive response from RabbitMQ' });
+    });
+}
 
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
