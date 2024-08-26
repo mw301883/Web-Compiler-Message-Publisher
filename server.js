@@ -9,10 +9,14 @@ const port = 3001;
 const rabbitmqUrl = process.env.RABBITMQ_URL;
 const queueName = 'compile_queue';
 const queueResponseName = 'reply_queue';
+const corsOptions = { // TODO: Add config
+  origin: 'http://localhost:3000',
+  methods: 'POST',
+};
 
 let channel = null;
 let responseQueue = null;
-const responsePromises = new Map(); // Map to store correlationId and promises
+const responsePromises = new Map();
 
 async function connectToRabbitMQ() {
   try {
@@ -24,7 +28,6 @@ async function connectToRabbitMQ() {
     console.log(`Compile Queue Created: ${queueName}`);
     console.log(`Response Queue Created: ${responseQueue.queue}`);
 
-    // Start consuming messages from the response queue
     channel.consume(responseQueue.queue, (msg) => {
       if (msg && msg.properties && msg.properties.correlationId) {
         const correlationId = msg.properties.correlationId;
@@ -40,13 +43,13 @@ async function connectToRabbitMQ() {
 
   } catch (error) {
     console.error('Error connecting to RabbitMQ:', error);
-    setTimeout(connectToRabbitMQ, 5000);
+    setTimeout(connectToRabbitMQ, 10000);
   }
 }
 
 connectToRabbitMQ();
 
-app.use(cors()); // TODO: Add config
+app.use(cors(corsOptions));
 app.use(express.json());
 
 app.post('/compile', (req, res) => {
