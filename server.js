@@ -7,13 +7,9 @@ const app = express();
 const port = 3001;
 
 const rabbitmqUrl = process.env.RABBITMQ_URL;
+const appDomain = process.env.APP_DOMAIN;
 const queueName = 'compile_queue';
 const queueResponseName = 'reply_queue';
-const corsOptions = { // TODO: Add config
-  origin: 'http://localhost:3000',
-  methods: 'POST',
-};
-
 let channel = null;
 let responseQueue = null;
 const responsePromises = new Map();
@@ -49,7 +45,7 @@ async function connectToRabbitMQ() {
 
 connectToRabbitMQ();
 
-app.use(cors(corsOptions));
+app.use(cors('*'));
 app.use(express.json());
 
 app.post('/compile', (req, res) => {
